@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block title %}{{ code }} — ZeroFeeTech{% endblock %}{% block content %}<main id="main-content" class="error-page wrap"><div class="error-code">{{ code }}</div><h1>{{ heading }}</h1><p>{{ message }}</p><a class="button button-primary" href="{{ url_for('index') }}">Return to home ↗</a></main>{% endblock %}

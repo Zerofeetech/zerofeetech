@@ -29,7 +29,7 @@ def db():
     return conn
 
 
-def init_db():
+def def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with db() as con:
         con.executescript('''

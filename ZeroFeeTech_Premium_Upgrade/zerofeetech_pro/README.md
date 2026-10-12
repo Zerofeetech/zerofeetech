@@ -1,106 +1,43 @@
-# ZeroFeeTech — Premium Digital Studio
+# ZeroFeeTech Pro — Free-first digital workspace
 
-A responsive Flask website for **ZeroFeeTech** with a premium dark-tech visual system, service catalogue, featured capabilities, about/process/why-us/portfolio sections, a prompt-building studio, email/password accounts, a user workspace, project-request storage, and an administrator dashboard.
+A responsive Flask website with a premium dark interface, visible sign-up/sign-in, a saved workspace, project intake, an admin control center, and a browser-based utility suite.
 
-## Included
+## Included tools
+- Basic image editor: upload, resize, rotate, brightness, contrast, saturation, export PNG. Processing is done in the browser.
+- Writing templates: social caption, professional email, bio, product description, and draft checklist.
+- Prompt builder for websites/apps, image generation/editing, software, marketing, writing/research, and business planning.
+- Lightweight SEO content checklist.
+- JSON format/validate/minify.
+- Word, character, sentence and reading-time counter.
+- Upper/lower/title/sentence case conversion.
+- Base64 encode/decode for text.
+- Simple CSV preview.
+- HEX/RGB color picker and palette.
+- Structured project brief generator.
 
-- Premium responsive design for desktop, tablet and mobile; accessible navigation, reduced-motion support, scroll reveal, metadata, Open Graph tags and a branded SVG favicon.
-- Nine service categories: Coding, Design, Media, Writing, Marketing, Business Support, Data, E-commerce and Technical Solutions.
-- Four featured service panels and an honest portfolio section with no invented clients, reviews or project outcomes.
-- Phone and email links from the supplied brief. WhatsApp and LINE buttons clearly remain unconfigured until their official URLs are added.
-- Contact form with server-side validation that stores project requests in SQLite.
-- Optional email notification can be configured using SMTP environment variables (see below). Without SMTP configuration, requests are stored but no email is sent.
-- Email/password signup and login; passwords are stored as secure Werkzeug hashes.
-- User workspace with project request history and saved prompts.
-- Admin dashboard for viewing requests and users and updating project status.
-- Twelve prompt-building tools. These create reusable prompts/briefs; they do not pretend to be connected to a paid AI model.
-- CSRF protection for form and save endpoints, secure session cookie options, server-side admin role checks.
+## Honest capability notes
+This package does **not** claim to be a full ChatGPT replacement. The included writing/prompt builders use local templates and do not call a language model. Basic image edits do not include generative fill, object removal, or AI background replacement. Real AI chat, image generation, transcription, and advanced editing require a model/API integration or another service and may have limits or costs. The included utility tools process content locally in the browser wherever indicated.
 
-## Run locally (Windows)
+## Deploy on Render
+- Runtime: Python
+- Root Directory: `ZeroFeeTech_Premium_Upgrade/zerofeetech_pro` if these files remain inside that folder in the GitHub repository.
+- Build command: `pip install -r requirements.txt`
+- Start command: `gunicorn app:app --bind 0.0.0.0:$PORT`
+- Environment variables: `SECRET_KEY` (strong random secret), `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `CONTACT_EMAIL=zerofeetech@gmail.com`, `WHATSAPP_NUMBER` (optional public business number, digits only including country code), `COOKIE_SECURE=true`.
 
-1. Install Python 3.11 or newer.
-2. Extract this ZIP into a folder such as `Desktop\\ZeroFeeTech`.
-3. Open Command Prompt in that folder and run:
+If you move the project files to the repository root, clear Root Directory in Render instead of keeping the subfolder path. Do not store secrets in GitHub.
 
-   ```bat
-   py -m venv .venv
-   .venv\\Scripts\\activate
-   py -m pip install -r requirements.txt
-   set SECRET_KEY=replace-with-a-long-random-secret
-   set ADMIN_EMAIL=admin@zerofeetech.com
-   set ADMIN_PASSWORD=choose-a-unique-strong-password
-   py app.py
-   ```
+## Important production tasks
+SQLite persistence on free hosting may be ephemeral unless a persistent disk/database is configured. Before relying on customer data, configure persistent storage, backups, email verification, password reset, rate limiting, monitoring, and automated tests. Test registration, sign-in, sign-out, project requests and admin actions after each deploy.
 
-4. Open `http://127.0.0.1:5000`.
-5. Choose **Create free account** and sign up with the exact `ADMIN_EMAIL` and `ADMIN_PASSWORD` values to create the first admin account. Keep the password private. If an account with that email already exists as a normal user, this starter does not automatically promote it; promote it securely in the database or reset the database only if you do not need its records.
-6. Open `/admin` while signed in as admin.
+## Local run
+Install requirements, set a secure `SECRET_KEY`, configure a private `ADMIN_PASSWORD`, then run `python app.py`.
 
-## Render deployment
 
-Build command:
+## Assignment Studio (document upload + AI-assisted study)
 
-```sh
-pip install -r requirements.txt
-```
-
-Start command:
-
-```sh
-gunicorn app:app --bind 0.0.0.0:$PORT
-```
-
-Environment variables to set in Render:
-
-- `SECRET_KEY`: unique random secret; keep private.
-- `ADMIN_EMAIL`: `admin@zerofeetech.com` (the login identifier for the configured admin account).
-- `ADMIN_PASSWORD`: a unique strong password; never put it in source control.
-- `COOKIE_SECURE`: `true`.
-- Optional `DATABASE_PATH`: path to a persistent mounted disk if your hosting plan supports one.
-- Optional SMTP variables if you want email notifications: `SMTP_HOST`, `SMTP_PORT` (usually 587), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, and optionally `SMTP_USE_TLS=true`. Use credentials from a real email provider; do not use your account password.
-- Optional `CONTACT_EMAIL` or `MAIL_TO` to choose where contact notifications are delivered (defaults to the supplied `waynepradip10@gmail.com` address).
-- Optional `WHATSAPP_URL` and `LINE_URL` if you later configure official contact URLs. These are not automatically fabricated or enabled by the current UI.
-
-The included `render.yaml` requests `ADMIN_PASSWORD` as a secret. Set it in the Render dashboard when prompted.
-
-## Important production limitations
-
-- **SQLite persistence:** local SQLite is a real working database. However, Render's free web service filesystem is ephemeral, so data can be lost on restarts/redeploys/spin-downs. Before relying on this for customer records, configure persistent storage or migrate to a managed database and backups.
-- **Email address:** showing `admin@zerofeetech.com` does not create a real inbox or verify domain ownership. You must own/control the domain and configure a mailbox provider. Email/password login uses accounts stored in this app; it is not the same as having a mailbox at that address.
-- **Contact email notifications:** project requests are stored even if SMTP is absent. Automatic notification only works after valid SMTP settings are configured and tested.
-- **Admin setup:** `admin@zerofeetech.com` is not an admin account just because the email matches. The account gets the admin role only when the email and configured `ADMIN_PASSWORD` both match during signup.
-- **AI studio:** prompt tools generate structured prompts, not completed AI output. A real AI generation feature requires a model/API integration and careful review of cost and privacy.
-- **Security checklist:** before collecting real customer data, add rate limiting, email verification, password reset, database backups, audit logging, and a full production security review. Never commit secrets to GitHub.
-- **Free tiers:** hosting, domain registration, mailbox, databases and third-party AI plans are separate services with their own limits.
-
-## Main routes
-
-- `/` — public site and prompt studio
-- `/signup` — create account
-- `/login` — sign in
-- `/dashboard` — private workspace and project history
-- `/admin` — administrator dashboard
-- `/health` — health check
-
-## Project structure
-
-```text
-app.py
-requirements.txt
-render.yaml
-.env.example
-templates/
-  base.html
-  index.html
-  studio_section.html
-  auth.html
-  dashboard.html
-  admin.html
-  error.html
-static/
-  css/style.css
-  css/premium.css
-  js/main.js
-  js/premium.js
-  favicon.svg
-```
+- Visit `/assignment` to upload up to 8 files (PDF, DOCX, PPTX, TXT, MD, CSV, JSON, PNG, JPG, WEBP) and choose explain, solve step-by-step, outline, review, summarize, quiz, or citation-check workflow.
+- Document text is extracted in memory; uploads are not written to disk by this route. Uploaded content is sent to the configured AI provider only when `GOOGLE_API_KEY` is configured. Do not upload private or confidential material.
+- To enable genuine model-generated answers, create a Google AI Studio API key if your account/region has access to an applicable free tier, then add `GOOGLE_API_KEY` in Render → service → Environment. Free quotas, model availability, and provider terms can change; usage may stop when quota is exhausted. Never commit the key to GitHub. Optional `AI_MODEL` defaults to `gemini-2.5-flash`.
+- Without `GOOGLE_API_KEY`, the page clearly reports that AI is not connected rather than pretending the template has solved an assignment. Scanned PDFs may not contain selectable text; OCR is not included.
+- Assignment support is for learning, explanation, draft feedback and study. It does not promise detector evasion or conceal AI authorship. Students should verify facts, references, calculations, and their institution's submission policy.

@@ -1,358 +1,280 @@
-import os
-import sqlite3
-import secrets
-import smtplib
-from email.message import EmailMessage
-from datetime import datetime, timezone
-from functools import wraps
+import os, sqlite3, secrets, io, json, urllib.request, urllib.error, base64
 from pathlib import Path
-
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, abort
+from functools import wraps
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, abort
 from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.utils import secure_filename
 
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get('DATABASE_PATH', str(BASE_DIR / 'zerofeetech.db')))
-app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'dev-only-change-this-secret-before-deployment')
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = os.environ.get('COOKIE_SECURE', 'false').lower() == 'true'
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@zerofeetech.com').strip().lower()
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
+BASE=Path(__file__).resolve().parent
+GOOGLE_API_KEY=os.environ.get('GOOGLE_API_KEY','').strip()
+AI_MODEL=os.environ.get('AI_MODEL','gemini-2.5-flash').strip()
+DB_PATH=os.environ.get('DATABASE_PATH',str(BASE/'zerofeetech.db'))
+ADMIN_EMAIL=os.environ.get('ADMIN_EMAIL','admin@zerofeetech.com').strip().lower()
+CONTACT_EMAIL=os.environ.get('CONTACT_EMAIL','zerofeetech@gmail.com').strip()
+WHATSAPP_NUMBER=''.join(ch for ch in os.environ.get('WHATSAPP_NUMBER','') if ch.isdigit())
+ADMIN_PASSWORD=os.environ.get('ADMIN_PASSWORD','')
+app=Flask(__name__)
+app.secret_key=os.environ.get('SECRET_KEY') or secrets.token_hex(32)
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax', SESSION_COOKIE_SECURE=os.environ.get('COOKIE_SECURE','true').lower()=='true', MAX_CONTENT_LENGTH=12*1024*1024)
 
-
-def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+def connect():
+    c=sqlite3.connect(DB_PATH,timeout=15); c.row_factory=sqlite3.Row; return c
 
 def init_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with db() as con:
-        con.executescript('''
-        CREATE TABLE IF NOT EXISTS users (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL,
-          email TEXT NOT NULL UNIQUE,
-          password_hash TEXT NOT NULL,
-          role TEXT NOT NULL DEFAULT 'user',
-          created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS projects (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          user_id INTEGER,
-          name TEXT NOT NULL,
-          email TEXT NOT NULL,
-          service TEXT NOT NULL,
-          budget TEXT DEFAULT 'Not specified',
-          details TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'New',
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS saved_items (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          user_id INTEGER NOT NULL,
-          title TEXT NOT NULL,
-          kind TEXT NOT NULL,
-          content TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        ''')
-        # Promote only the configured admin account if its existing password hash matches
-        # the configured secret. Never promote based on email address alone.
-        if ADMIN_PASSWORD:
-            existing = con.execute('SELECT id, password_hash FROM users WHERE email=?', (ADMIN_EMAIL,)).fetchone()
-            if existing and check_password_hash(existing['password_hash'], ADMIN_PASSWORD):
-                con.execute("UPDATE users SET role='admin' WHERE id=?", (existing['id'],))
+    Path(DB_PATH).parent.mkdir(parents=True,exist_ok=True)
+    with connect() as c:
+        c.executescript('''CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'user',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,title TEXT NOT NULL,category TEXT NOT NULL,details TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'New',created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS saved_items(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,title TEXT NOT NULL,content TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP);''')
 
+def csrf():
+    if '_csrf' not in session: session['_csrf']=secrets.token_urlsafe(24)
+    return session['_csrf']
+app.jinja_env.globals['csrf_token']=csrf
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat(timespec='seconds')
-
-
-def current_user():
-    user_id = session.get('user_id')
-    if not user_id:
-        return None
-    with db() as con:
-        row = con.execute('SELECT id,name,email,role,created_at FROM users WHERE id=?', (user_id,)).fetchone()
-    if not row:
-        session.pop('user_id', None)
-        return None
-    return dict(row)
-
-
-def login_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        if not current_user():
-            flash('Please sign in to open your workspace.', 'info')
-            return redirect(url_for('login', next=request.path))
-        return view(*args, **kwargs)
-    return wrapped
-
-
-def admin_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        user = current_user()
-        if not user or user['role'] != 'admin':
-            abort(403)
-        return view(*args, **kwargs)
-    return wrapped
-
-
-@app.context_processor
-def inject_globals():
-    return {
-        'site_user': current_user(),
-        'admin_email': ADMIN_EMAIL,
-        'current_year': datetime.now().year,
-        'whatsapp_url': os.environ.get('WHATSAPP_URL', '').strip(),
-        'line_url': os.environ.get('LINE_URL', '').strip(),
-    }
-
+def me():
+    uid=session.get('uid')
+    if not uid:return None
+    with connect() as c:r=c.execute('SELECT id,name,email,role,created_at FROM users WHERE id=?',(uid,)).fetchone()
+    return dict(r) if r else None
+app.jinja_env.globals['current_user']=me
+app.jinja_env.globals['contact_email']=CONTACT_EMAIL
+app.jinja_env.globals['whatsapp_number']=WHATSAPP_NUMBER
 
 @app.before_request
-def make_csrf_token():
-    if 'csrf_token' not in session:
-        session['csrf_token'] = secrets.token_urlsafe(32)
-
-
 def check_csrf():
-    sent = request.form.get('csrf_token') or request.headers.get('X-CSRF-Token')
-    return bool(sent and secrets.compare_digest(sent, session.get('csrf_token', '')))
+    if request.method=='POST':
+        sent=request.form.get('_csrf') or request.headers.get('X-CSRF-Token')
+        if not sent or not secrets.compare_digest(sent,session.get('_csrf','')): abort(400,'Security token expired. Refresh and try again.')
 
+def login_required(f):
+    @wraps(f)
+    def w(*a,**kw):
+        if not me(): flash('Sign in to access your workspace.','info'); return redirect(url_for('login'))
+        return f(*a,**kw)
+    return w
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+def admin_required(f):
+    @wraps(f)
+    def w(*a,**kw):
+        u=me()
+        if not u or u['role']!='admin': abort(403)
+        return f(*a,**kw)
+    return w
 
+@app.get('/')
+def home():return render_template('index.html',title='ZeroFeeTech')
+@app.get('/tools')
+def tools():return render_template('tools.html',title='All tools')
 
-@app.route('/health')
-def health():
-    return jsonify({'status': 'ok', 'service': 'ZeroFeeTech'})
+ALLOWED_IMAGE_EXTS={'.png','.jpg','.jpeg','.webp'}
 
+def extract_upload(file):
+    # Extract readable text from supported documents without saving uploads to disk.
+    from pathlib import PurePath
+    name=(file.filename or 'uploaded-file').replace('\\','/').split('/')[-1][:180]
+    ext=PurePath(name).suffix.lower()
+    raw=file.read()
+    if not raw:
+        return name, '', None
+    if ext in {'.txt','.md','.csv','.json'}:
+        return name, raw.decode('utf-8-sig',errors='replace')[:60000], None
+    if ext=='.pdf':
+        try:
+            from pypdf import PdfReader
+            reader=PdfReader(io.BytesIO(raw))
+            pages=[]
+            for i,page in enumerate(reader.pages[:80]):
+                pages.append(f'\n[Page {i+1}]\n'+(page.extract_text() or ''))
+            return name, '\n'.join(pages)[:60000], None
+        except Exception:
+            return name, '', 'Could not read this PDF. It may be scanned or damaged; try a text-based PDF or paste the text.'
+    if ext=='.docx':
+        try:
+            from docx import Document
+            doc=Document(io.BytesIO(raw))
+            text='\n'.join(p.text for p in doc.paragraphs)
+            for table in doc.tables:
+                text+='\n'+'\n'.join(' | '.join(cell.text for cell in row.cells) for row in table.rows)
+            return name, text[:60000], None
+        except Exception:
+            return name, '', 'Could not read this DOCX. Please re-save it as a standard .docx file.'
+    if ext=='.pptx':
+        try:
+            from pptx import Presentation
+            deck=Presentation(io.BytesIO(raw)); slides=[]
+            for i,slide in enumerate(deck.slides[:80]):
+                bits=[]
+                for shape in slide.shapes:
+                    if getattr(shape,'has_text_frame',False) and shape.text.strip(): bits.append(shape.text.strip())
+                    if getattr(shape,'has_table',False):
+                        bits.extend(' | '.join(cell.text for cell in row.cells) for row in shape.table.rows)
+                slides.append(f'\n[Slide {i+1}]\n'+'\n'.join(bits))
+            return name, '\n'.join(slides)[:60000], None
+        except Exception:
+            return name, '', 'Could not read this PPTX. Please re-save it as a standard .pptx file.'
+    if ext in ALLOWED_IMAGE_EXTS:
+        mime={'.jpg':'image/jpeg','.jpeg':'image/jpeg','.png':'image/png','.webp':'image/webp'}.get(ext)
+        if mime:
+            return name, '', {'mime_type':mime,'data':base64.b64encode(raw).decode('ascii')}
+    return name, '', 'Unsupported file type. Use PDF, DOCX, PPTX, TXT, MD, CSV, JSON, PNG, JPG or WEBP.'
 
-@app.route('/signup', methods=['GET', 'POST'])
-def signup():
-    if current_user():
-        return redirect(url_for('dashboard'))
-    if request.method == 'POST':
-        if not check_csrf():
-            abort(400, 'Security token expired. Refresh and try again.')
-        name = request.form.get('name', '').strip()[:80]
-        email = request.form.get('email', '').strip().lower()[:254]
-        password = request.form.get('password', '')
-        if len(name) < 2 or '@' not in email or '.' not in email.split('@')[-1]:
-            flash('Enter your name and a valid email address.', 'error')
-        elif len(password) < 10:
-            flash('Use a password with at least 10 characters.', 'error')
-        else:
-            try:
-                with db() as con:
-                    con.execute('INSERT INTO users(name,email,password_hash,role,created_at) VALUES(?,?,?,?,?)',
-                                (name, email, generate_password_hash(password), ('admin' if email == ADMIN_EMAIL and ADMIN_PASSWORD and secrets.compare_digest(password, ADMIN_PASSWORD) else 'user'), now_iso()))
-                with db() as con:
-                    user = con.execute('SELECT id FROM users WHERE email=?', (email,)).fetchone()
-                session.clear()
-                session['user_id'] = user['id']
-                session['csrf_token'] = secrets.token_urlsafe(32)
-                flash('Your ZeroFeeTech workspace is ready.', 'success')
-                return redirect(url_for('dashboard'))
-            except sqlite3.IntegrityError:
-                flash('An account with that email already exists. Sign in instead.', 'error')
-    return render_template('auth.html', mode='signup')
+def call_gemini(prompt, image_parts=None):
+    if not GOOGLE_API_KEY:
+        return None, 'AI is not connected yet. Add GOOGLE_API_KEY in Render Environment to enable model-powered answers. This page will not pretend a template is a genuine AI answer.'
+    body_parts=[{'text':prompt}]
+    for part in (image_parts or []):
+        body_parts.append({'inline_data':{'mime_type':part['mime_type'],'data':part['data']}})
+    payload={'contents':[{'role':'user','parts':body_parts}], 'generationConfig':{'temperature':0.25,'maxOutputTokens':7000}}
+    endpoint=f'https://generativelanguage.googleapis.com/v1beta/models/{AI_MODEL}:generateContent?key={GOOGLE_API_KEY}'
+    req=urllib.request.Request(endpoint,data=json.dumps(payload).encode(),headers={'Content-Type':'application/json'},method='POST')
+    try:
+        with urllib.request.urlopen(req,timeout=50) as response: data=json.loads(response.read().decode('utf-8'))
+        answer='\n'.join(part.get('text','') for candidate in data.get('candidates',[]) for part in candidate.get('content',{}).get('parts',[]) if part.get('text'))
+        if not answer: return None, 'The AI service returned no text. Try a smaller file or a more specific question.'
+        return answer, None
+    except urllib.error.HTTPError as e:
+        detail=''
+        try: detail=e.read().decode('utf-8')[:500]
+        except Exception: pass
+        return None, f'AI provider error ({e.code}). Check the API key, model access and free-tier quota. {detail}'
+    except Exception:
+        return None, 'Could not reach the AI provider. Please try again in a moment.'
 
+@app.get('/assignment')
+def assignment():
+    return render_template('assignment.html',title='Assignment Studio',ai_connected=bool(GOOGLE_API_KEY))
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if current_user():
-        return redirect(url_for('dashboard'))
-    if request.method == 'POST':
-        if not check_csrf():
-            abort(400, 'Security token expired. Refresh and try again.')
-        email = request.form.get('email', '').strip().lower()[:254]
-        password = request.form.get('password', '')
-        with db() as con:
-            user = con.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
-        if user and check_password_hash(user['password_hash'], password):
-            session.clear()
-            session['user_id'] = user['id']
-            session['csrf_token'] = secrets.token_urlsafe(32)
-            flash('Welcome back.', 'success')
-            dest = request.args.get('next', '')
-            return redirect(dest if dest.startswith('/') and not dest.startswith('//') else url_for('dashboard'))
-        flash('Email or password is incorrect.', 'error')
-    return render_template('auth.html', mode='login')
+@app.post('/assignment')
+def assignment_post():
+    task=request.form.get('task','explain').strip().lower()
+    if task not in {'explain','solve','outline','review','summarize','quiz','citation'}: task='explain'
+    question=request.form.get('question','').strip()[:12000]
+    level=request.form.get('level','undergraduate').strip()[:80]
+    language=request.form.get('language','English').strip()[:60]
+    files=[f for f in request.files.getlist('files') if f and f.filename]
+    if not question and not files:
+        flash('Type your question or upload at least one file first.','error')
+        return redirect(url_for('assignment'))
+    if len(files)>8:
+        flash('Please upload up to 8 files at a time.','error')
+        return redirect(url_for('assignment'))
+    docs=[]; image_parts=[]; warnings=[]
+    for file in files:
+        name,content,image_or_error=extract_upload(file)
+        if isinstance(image_or_error,dict): image_parts.append(image_or_error); docs.append((name,'[Image attached for visual analysis]'))
+        elif isinstance(image_or_error,str) and image_or_error: warnings.append(f'{name}: {image_or_error}')
+        else: docs.append((name,content or '[No selectable text found in this file]'))
+    context='\n\n'.join(f'===== FILE: {name} =====\n{text}' for name,text in docs)[:100000]
+    task_guides={
+      'explain':'Explain the material clearly from fundamentals to advanced level, define key terms, show examples, and identify ambiguity.',
+      'solve':'Work through the supplied questions step by step. Show reasoning, formulas or evidence where relevant, then provide a concise final answer and self-check. If information is missing, state assumptions instead of inventing facts.',
+      'outline':'Create a detailed assignment outline with thesis or objective, section headings, key points, evidence needed, and a completion checklist. Do not fabricate sources.',
+      'review':"Review the student's own draft for accuracy, structure, clarity, grammar, unsupported claims, and missing citations. Give specific suggestions and a revised sample passage where helpful.",
+      'summarize':'Summarize the material in plain language, then give key points, definitions, and a short revision sheet.',
+      'quiz':'Create a study quiz from the provided material with mixed difficulty and an answer key with explanations at the end.',
+      'citation':'Identify claims that need sources and explain what source types to look for. Format only bibliographic details that are actually provided; never invent citations or page numbers.'}
+    prompt=(f"You are ZeroFeeTech Study & Assignment Assistant. Support learning, accuracy and student independence. Respond in {language}. Student level: {level}. Task: {task}.\n\n"
+      f"INSTRUCTIONS: {task_guides[task]}\n\n"
+      "Important: Never claim to bypass AI detectors or disguise authorship. Help the student understand the subject and create a draft they must verify, personalize and submit according to their institution's rules. Do not fabricate references, quotes, facts, page numbers, data, or answers. If a file is unreadable or a question is ambiguous, say so. For calculations, show steps and verify the result. Structure the response with clear headings and actionable next steps.\n\n"
+      f"STUDENT QUESTION / INSTRUCTIONS:\n{question or '(No extra question; infer the task from uploaded files and state any uncertainty.)'}\n\n"
+      f"EXTRACTED FILE CONTENT:\n{context or '(No text extracted from uploaded files.)'}")
+    answer,error=call_gemini(prompt,image_parts)
+    result={'answer':answer,'error':error,'warnings':warnings,'files':[n for n,_ in docs], 'question':question,'task':task}
+    if answer and me():
+        try:
+            with connect() as c:c.execute('INSERT INTO saved_items(user_id,title,content) VALUES(?,?,?)',(me()['id'],f'Assignment Studio — {task.title()}',answer[:20000]))
+            result['saved']=True
+        except Exception: result['saved']=False
+    return render_template('assignment.html',title='Assignment Studio',ai_connected=bool(GOOGLE_API_KEY),result=result)
 
-
-@app.route('/logout', methods=['POST'])
-def logout():
-    if not check_csrf():
-        abort(400)
-    session.clear()
-    flash('You have signed out.', 'info')
-    return redirect(url_for('index'))
-
-
-@app.route('/dashboard')
+@app.get('/signup')
+def signup():return render_template('auth.html',mode='signup',title='Create account')
+@app.post('/signup')
+def signup_post():
+    name=request.form.get('name','').strip()[:100]; email=request.form.get('email','').strip().lower()[:254]; pw=request.form.get('password','')
+    if len(name)<2 or '@' not in email or len(pw)<10: flash('Use a valid email and a password of at least 10 characters.','error'); return redirect(url_for('signup'))
+    role='admin' if email==ADMIN_EMAIL and ADMIN_PASSWORD and secrets.compare_digest(pw,ADMIN_PASSWORD) else 'user'
+    try:
+        with connect() as c:c.execute('INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,?)',(name,email,generate_password_hash(pw),role))
+        flash('Account created. Sign in to continue.','success');return redirect(url_for('login'))
+    except sqlite3.IntegrityError:flash('An account with that email already exists. Try signing in.','error');return redirect(url_for('signup'))
+@app.get('/login')
+def login():return render_template('auth.html',mode='login',title='Sign in')
+@app.post('/login')
+def login_post():
+    email=request.form.get('email','').strip().lower(); pw=request.form.get('password','')
+    with connect() as c:r=c.execute('SELECT * FROM users WHERE email=?',(email,)).fetchone()
+    # Safe recovery path for the configured administrator: the hosting environment variable is authoritative.
+    if email==ADMIN_EMAIL and ADMIN_PASSWORD and secrets.compare_digest(pw,ADMIN_PASSWORD):
+        with connect() as c:
+            if r:
+                c.execute("UPDATE users SET role='admin',password_hash=? WHERE id=?",(generate_password_hash(pw),r['id']))
+                r=c.execute('SELECT * FROM users WHERE id=?',(r['id'],)).fetchone()
+            else:
+                c.execute("INSERT INTO users(name,email,password_hash,role) VALUES(?,?,?,'admin')",('ZeroFeeTech Admin',ADMIN_EMAIL,generate_password_hash(pw)))
+                r=c.execute('SELECT * FROM users WHERE email=?',(ADMIN_EMAIL,)).fetchone()
+    if not r or not check_password_hash(r['password_hash'],pw):flash('Email or password is incorrect.','error');return redirect(url_for('login'))
+    session.clear();session['uid']=r['id'];session['_csrf']=secrets.token_urlsafe(24)
+    return redirect(url_for('admin' if r['role']=='admin' else 'dashboard'))
+@app.post('/logout')
+def logout():session.clear();flash('Signed out successfully.','success');return redirect(url_for('home'))
+@app.get('/dashboard')
 @login_required
 def dashboard():
-    user = current_user()
-    with db() as con:
-        projects = con.execute('SELECT * FROM projects WHERE user_id=? ORDER BY id DESC LIMIT 20', (user['id'],)).fetchall()
-        saved = con.execute('SELECT * FROM saved_items WHERE user_id=? ORDER BY id DESC LIMIT 20', (user['id'],)).fetchall()
-    return render_template('dashboard.html', user=user, projects=projects, saved=saved)
-
-
-@app.route('/admin')
-@admin_required
-def admin_dashboard():
-    with db() as con:
-        users = con.execute('SELECT id,name,email,role,created_at FROM users ORDER BY id DESC LIMIT 100').fetchall()
-        projects = con.execute('SELECT * FROM projects ORDER BY id DESC LIMIT 100').fetchall()
-        counts = {
-            'users': con.execute('SELECT COUNT(*) FROM users').fetchone()[0],
-            'projects': con.execute('SELECT COUNT(*) FROM projects').fetchone()[0],
-            'new': con.execute("SELECT COUNT(*) FROM projects WHERE status='New'").fetchone()[0],
-        }
-    return render_template('admin.html', users=users, projects=projects, counts=counts)
-
-
-@app.route('/admin/project/<int:project_id>/status', methods=['POST'])
-@admin_required
-def update_project_status(project_id):
-    if not check_csrf():
-        abort(400)
-    status = request.form.get('status', 'New')
-    if status not in {'New', 'Reviewing', 'In progress', 'Completed', 'Archived'}:
-        abort(400)
-    with db() as con:
-        con.execute('UPDATE projects SET status=? WHERE id=?', (status, project_id))
-    flash('Project status updated.', 'success')
-    return redirect(url_for('admin_dashboard'))
-
-
-@app.route('/api/tool', methods=['POST'])
-def tool_api():
-    data = request.get_json(silent=True) or {}
-    tool = str(data.get('tool', ''))[:40]
-    prompt = str(data.get('prompt', '')).strip()[:3000]
-    if len(prompt) < 4:
-        return jsonify({'error': 'Add a few details first.'}), 400
-    tool_specs = {
-      'website': ('Website starter brief', 'Create a responsive, accessible website starter using semantic HTML, modern CSS, and vanilla JavaScript. Include desktop, tablet, and mobile layouts. Explain how to run it locally. Avoid external paid services.'),
-      'app': ('App product brief', 'Turn the idea into a clear app product plan: target users, core screens, main user flows, data model, accessibility, security, and an MVP build plan.'),
-      'software': ('Software build plan', 'Produce a practical software engineering plan: requirements, architecture, folder structure, dependencies, error handling, testing, setup instructions, and limitations.'),
-      'ai': ('AI project plan', 'Design a responsible AI project plan with the use case, input/output, free-tier options where available, privacy considerations, evaluation, fallback behavior, and a realistic cost note.'),
-      'automation': ('Automation workflow', 'Map this repetitive task into a workflow with trigger, steps, decision points, error handling, human approval, privacy, and free tools to investigate.'),
-      'uiux': ('UI/UX design brief', 'Create a UI/UX brief with target audience, user journey, information architecture, wireframe descriptions, accessibility, and a cohesive design system.'),
-      'graphic': ('Graphic design brief', 'Create a graphic design brief with composition, hierarchy, color palette, typography direction, layout, and export sizes. Do not claim an image has been rendered.'),
-      'logo': ('Logo concept brief', 'Generate three original logo directions with symbol idea, typography, colors, usage notes, and a simple SVG concept if possible.'),
-      'social': ('Social content planner', 'Build a useful social content plan with hooks, formats, calls to action, and a publishing checklist. Avoid false claims.'),
-      'email': ('Professional email draft', 'Draft a concise, courteous professional email with a clear subject, purpose, and next step.'),
-      'business': ('Business launch plan', 'Create a lean launch plan with audience, value proposition, MVP, distribution, simple metrics, and realistic risks.'),
-      'code': ('Coding assistant prompt', 'Act as a careful software engineer. Clarify assumptions, provide runnable code, setup steps, tests, and security notes. Do not invent API keys or claim untested code was executed.'),
-    }
-    if tool not in tool_specs:
-        return jsonify({'error': 'Choose one of the available tools.'}), 400
-    title, instruction = tool_specs[tool]
-    result = f"{instruction}\n\nProject details:\n{prompt}\n\nRequirements:\n- Prefer free and open-source options where practical.\n- State any paid service or external API requirement clearly.\n- Do not fabricate results, credentials, or capabilities.\n- Give a beginner-friendly step-by-step output."
-    return jsonify({'title': title, 'result': result, 'notice': 'Free local prompt builder: this creates a reusable prompt, not an AI-generated finished project. No paid AI API is connected.'})
-
-
-@app.route('/api/save', methods=['POST'])
+    u=me()
+    with connect() as c:
+        projects=c.execute('SELECT * FROM projects WHERE user_id=? ORDER BY id DESC',(u['id'],)).fetchall();saved=c.execute('SELECT * FROM saved_items WHERE user_id=? ORDER BY id DESC',(u['id'],)).fetchall()
+    return render_template('dashboard.html',title='Workspace',projects=projects,saved=saved)
+@app.post('/save')
 @login_required
-def save_item():
-    data = request.get_json(silent=True) or {}
-    if not check_csrf():
-        return jsonify({'error': 'Refresh the page and try again.'}), 400
-    title = str(data.get('title', 'Saved item')).strip()[:120]
-    kind = str(data.get('kind', 'prompt')).strip()[:40]
-    content = str(data.get('content', '')).strip()[:12000]
-    if not content:
-        return jsonify({'error': 'Nothing to save.'}), 400
-    with db() as con:
-        con.execute('INSERT INTO saved_items(user_id,title,kind,content,created_at) VALUES(?,?,?,?,?)',
-                    (current_user()['id'], title, kind, content, now_iso()))
-    return jsonify({'ok': True})
-
-
-def send_project_notification(name, email, service, budget, details):
-    """Send an optional email notification when valid SMTP settings are configured."""
-    host = os.environ.get('SMTP_HOST', '').strip()
-    username = os.environ.get('SMTP_USERNAME', '').strip()
-    password = os.environ.get('SMTP_PASSWORD', '')
-    sender = os.environ.get('SMTP_FROM', '').strip() or username
-    recipient = os.environ.get('MAIL_TO', os.environ.get('CONTACT_EMAIL', 'waynepradip10@gmail.com')).strip()
-    if not (host and sender and recipient):
-        return False
-    try:
-        message = EmailMessage()
-        message['Subject'] = f'New ZeroFeeTech project request: {service}'
-        message['From'] = sender
-        message['To'] = recipient
-        message['Reply-To'] = email
-        message.set_content(
-            f'New project request received on ZeroFeeTech\n\n'
-            f'Name: {name}\nEmail: {email}\nService: {service}\nBudget: {budget}\n\n'
-            f'Project details:\n{details}\n'
-        )
-        port = int(os.environ.get('SMTP_PORT', '587'))
-        use_tls = os.environ.get('SMTP_USE_TLS', 'true').lower() == 'true'
-        with smtplib.SMTP(host, port, timeout=12) as server:
-            if use_tls:
-                server.starttls()
-            if username:
-                server.login(username, password)
-            server.send_message(message)
-        return True
-    except Exception:
-        app.logger.exception('ZeroFeeTech SMTP notification failed; project request remains saved.')
-        return False
-
-
-@app.route('/contact', methods=['POST'])
-def contact():
-    if not check_csrf():
-        abort(400, 'Refresh the page and try again.')
-    name = request.form.get('name', '').strip()[:100]
-    email = request.form.get('email', '').strip()[:254]
-    service = request.form.get('service', 'General enquiry').strip()[:100]
-    budget = request.form.get('budget', 'Not specified').strip()[:50]
-    details = request.form.get('details', '').strip()[:4000]
-    if len(name) < 2 or '@' not in email or len(details) < 10:
-        flash('Please complete your name, valid email, and project details.', 'error')
-        return redirect(url_for('index') + '#contact')
-    user = current_user()
-    with db() as con:
-        con.execute('INSERT INTO projects(user_id,name,email,service,budget,details,status,created_at) VALUES(?,?,?,?,?,?,?,?)',
-                    (user['id'] if user else None, name, email, service, budget, details, 'New', now_iso()))
-    notified = send_project_notification(name, email, service, budget, details)
-    if notified:
-        flash('Your project request was saved and an email notification was sent to the configured studio inbox.', 'success')
+def save():
+    title=request.form.get('title','Saved prompt').strip()[:120];content=request.form.get('content','').strip()[:20000]
+    if content:
+        with connect() as c:c.execute('INSERT INTO saved_items(user_id,title,content) VALUES(?,?,?)',(me()['id'],title,content))
+        flash('Saved to your library.','success')
+    else:flash('There is no content to save yet.','error')
+    return redirect(url_for('dashboard'))
+@app.post('/request-project')
+def request_project():
+    title=request.form.get('title','').strip()[:160];category=request.form.get('category','Website').strip()[:80];details=request.form.get('details','').strip()[:10000];u=me()
+    if len(title)<3 or len(details)<10:flash('Please add a title and a little more project detail.','error');return redirect(url_for('home')+'#start')
+    with connect() as c:c.execute('INSERT INTO projects(user_id,title,category,details) VALUES(?,?,?,?)',(u['id'] if u else None,title,category,details))
+    flash('Project brief received.','success');return redirect(url_for('dashboard') if u else url_for('home')+'#start')
+@app.post('/api/build-prompt')
+def build_prompt():
+    d=request.get_json(silent=True) or {};category=str(d.get('category','Website'))[:80];idea=str(d.get('idea','')).strip()[:3000];audience=str(d.get('audience','general users'))[:300];style=str(d.get('style','premium, accessible, modern'))[:300]
+    if len(idea)<5:return jsonify(error='Please describe your idea in a little more detail.'),400
+    prompt=f'''Act as a senior product designer, software architect, and quality engineer.\n\nPROJECT TYPE: {category}\nCORE IDEA: {idea}\nTARGET USERS: {audience}\nDESIGN DIRECTION: {style}\n\nDELIVERABLES\n1. Product objective, assumptions, and user stories.\n2. Information architecture and end-to-end user journeys.\n3. A distinctive responsive design system and accessibility requirements.\n4. Maintainable technical architecture and implementation steps.\n5. Loading, empty, validation, error, and success states.\n6. Testing plan for mobile, desktop, security, performance, and accessibility.\n7. Deployment, environment-variable, monitoring, backup, and rollback checklist.\n\nBe specific. Do not claim integrations are live unless they are implemented and tested. Identify external services and API keys required.'''
+    return jsonify(prompt=prompt)
+@app.get('/admin')
+@admin_required
+def admin():
+    with connect() as c:
+        stats={'users':c.execute('SELECT COUNT(*) FROM users').fetchone()[0],'projects':c.execute('SELECT COUNT(*) FROM projects').fetchone()[0],'new':c.execute("SELECT COUNT(*) FROM projects WHERE status='New'").fetchone()[0],'saved':c.execute('SELECT COUNT(*) FROM saved_items').fetchone()[0]}
+        users=c.execute('SELECT id,name,email,role,created_at FROM users ORDER BY id DESC LIMIT 200').fetchall();projects=c.execute('SELECT p.*,u.name AS owner FROM projects p LEFT JOIN users u ON u.id=p.user_id ORDER BY p.id DESC LIMIT 200').fetchall()
+    return render_template('admin.html',title='Admin control center',stats=stats,users=users,projects=projects)
+@app.post('/admin/project/<int:pid>/status')
+@admin_required
+def status(pid):
+    s=request.form.get('status','New')
+    if s not in {'New','Reviewing','In progress','Completed','Declined'}:abort(400)
+    with connect() as c:c.execute('UPDATE projects SET status=? WHERE id=?',(s,pid))
+    flash('Project status updated.','success');return redirect(url_for('admin')+'#projects')
+@app.post('/admin/user/<int:uid>/role')
+@admin_required
+def role(uid):
+    r=request.form.get('role','user')
+    if r not in {'user','admin'}:abort(400)
+    if uid==me()['id'] and r!='admin':flash('You cannot remove your own admin role here.','error')
     else:
-        flash('Your project request was saved successfully. Email notifications are not configured yet, so the request is available in the admin dashboard.', 'success')
-    return redirect(url_for('dashboard') if user else (url_for('index') + '#contact'))
-
-
+        with connect() as c:c.execute('UPDATE users SET role=? WHERE id=?',(r,uid))
+        flash('User role updated.','success')
+    return redirect(url_for('admin')+'#users')
+@app.errorhandler(400)
+def bad(e):return render_template('error.html',title='Request error',code=400,message=getattr(e,'description','Refresh and try again.')),400
 @app.errorhandler(403)
-def forbidden(_error):
-    return render_template('error.html', code=403, heading='Access restricted', message='This page is only available to the ZeroFeeTech administrator.'), 403
-
-
+def forbidden(e):return render_template('error.html',title='Access restricted',code=403,message='This area is restricted to authorized administrators.'),403
 @app.errorhandler(404)
-def not_found(_error):
-    return render_template('error.html', code=404, heading='Page not found', message='That page may have moved. Return to the ZeroFeeTech home page.'), 404
-
-
+def missing(e):return render_template('error.html',title='Page not found',code=404,message='The page could not be found.'),404
 init_db()
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
+if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.environ.get('PORT',5000)),debug=False)

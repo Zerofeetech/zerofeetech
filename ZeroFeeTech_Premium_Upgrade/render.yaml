@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: zerofeetech
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    plan: free
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: zerofeetech@gmail.com
+      - key: CONTACT_EMAIL
+        value: zerofeetech@gmail.com
+      - key: WHATSAPP_NUMBER
+        value: ""
+      - key: COOKIE_SECURE
+        value: "true"

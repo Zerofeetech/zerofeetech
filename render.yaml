@@ -2,17 +2,22 @@ services:
   - type: web
     name: zerofeetech
     runtime: python
+    rootDir: ZeroFeeTech_Premium_Upgrade/zerofeetech_pro
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 120
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     plan: free
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.8
       - key: SECRET_KEY
         generateValue: true
       - key: ADMIN_EMAIL
-        value: admin@zerofeetech.com
+        value: zerofeetech@gmail.com
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CONTACT_EMAIL
+        value: zerofeetech@gmail.com
+      - key: WHATSAPP_NUMBER
+        value: ""
       - key: COOKIE_SECURE
         value: "true"
-      - key: DATABASE_PATH
-        value: /tmp/zerofeetech.db
+      - key: GOOGLE_API_KEY
+        sync: false
